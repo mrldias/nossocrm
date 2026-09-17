@@ -180,6 +180,42 @@ export interface ProcessMessageParams {
   simulationMode?: boolean;
 }
 
+/**
+ * Aciona o dreno da fila de avaliações de estágio imediatamente após enfileirar.
+ *
+ * O cron /api/cron/stage-evaluations roda apenas 1x/dia — limite de contas Hobby
+ * da Vercel, que rejeitam schedules mais frequentes que diário. Sem este disparo,
+ * um avanço de estágio esperaria até a próxima execução do cron.
+ *
+ * Fire-and-forget deliberado: a resposta ao lead já foi enviada neste ponto, então
+ * falha aqui nunca pode propagar. Se o disparo não acontecer, a linha permanece
+ * 'pending' e o cron diário a processa — o cron vira rede de segurança.
+ *
+ * A rota é idempotente (claim otimista via UPDATE ... status='processing' antes do
+ * read), então sobreposição entre este disparo e o cron não processa duas vezes.
+ */
+function triggerStageEvaluationDrain(): void {
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret) {
+    console.warn('[AIAgent] CRON_SECRET ausente — dreno adiado para o cron diário');
+    return;
+  }
+
+  const vercelUrl = process.env.VERCEL_URL;
+  const baseUrl =
+    process.env.NEXT_PUBLIC_APP_URL || (vercelUrl ? `https://${vercelUrl}` : null);
+  if (!baseUrl) {
+    console.warn('[AIAgent] URL base ausente — dreno adiado para o cron diário');
+    return;
+  }
+
+  void fetch(`${baseUrl.replace(/\/$/, '')}/api/cron/stage-evaluations`, {
+    headers: { Authorization: `Bearer ${cronSecret}` },
+  }).catch((err: unknown) => {
+    console.error('[AIAgent] Falha ao acionar dreno de avaliações:', err);
+  });
+}
+
 // =============================================================================
 // Agent Service
 // =============================================================================
@@ -686,6 +722,7 @@ export async function processIncomingMessage(
         // Non-fatal: response was already sent successfully
       } else {
         console.log('[AIAgent] Stage evaluation enqueued for conversation:', conversationId);
+        triggerStageEvaluationDrain();
       }
     }
 
